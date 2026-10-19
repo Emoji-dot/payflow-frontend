@@ -126,6 +126,28 @@ export async function chainPlansOf(source: string, merchant: string): Promise<Ap
   return plans.map(planToApi).sort((a, b) => b.id - a.id);
 }
 
+/**
+ * Read the open-mandate count for a single plan from contract state.
+ *
+ * Returns null when the deployed contract predates `plan_subscriber_count`
+ * (payflow-contract#25), so the caller can hide the stat rather than show
+ * a misleading zero.
+ *
+ * Exported for tests.
+ */
+export async function chainPlanSubscriberCount(
+  source: string,
+  planId: number,
+): Promise<number | null> {
+  try {
+    return await payflow.planSubscriberCount(source, planId);
+  } catch {
+    // Old contracts do not expose this getter. Return null so the UI can
+    // hide the subscriber count rather than claim it is zero.
+    return null;
+  }
+}
+
 export async function chainMandatesOf(
   source: string,
   subscriber: string,

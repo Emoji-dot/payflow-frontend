@@ -76,6 +76,25 @@ export interface ApiVaultEvent {
   ledger: number;
 }
 
+/**
+ * Per-plan performance stats, proposed by payflow-backend#29.
+ *
+ * Optional fields are absent when the backend does not yet serve this endpoint
+ * or when the data is unavailable. Callers must treat `undefined` as "cannot
+ * say" rather than zero.
+ *
+ * `total_collected` is in smallest units (stroops) as a decimal string so
+ * bigint math is always used — never floats.
+ */
+export interface ApiPlanStats {
+  /** Open mandates (active + paused). */
+  subscriber_count: number;
+  /** Net of the protocol fee, in smallest units as a decimal string. */
+  total_collected: string;
+  /** Mandates ended by either party. */
+  cancellations: number;
+}
+
 export interface MerchantSummary {
   merchant: string;
   activeMandates: number;
@@ -141,4 +160,11 @@ export const api = {
     return get<unknown>(`/api/merchants/${address}/revenue${qs ? `?${qs}` : ""}`);
   },
   due: () => get<{ now: number; due: ApiMandate[] }>("/api/due"),
+  /**
+   * Per-plan stats, proposed by payflow-backend#29.
+   *
+   * Returns null when the backend is unreachable or does not yet serve this
+   * endpoint — the UI must hide the stats section rather than show stale zeros.
+   */
+  planStats: (planId: number) => get<ApiPlanStats>(`/api/plans/${planId}/stats`),
 };

@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   chainMerchantSummary,
+  chainPlanSubscriberCount,
   endable,
   mandateFunding,
   mandateToApi,
@@ -229,5 +230,41 @@ describe("mandateFunding", () => {
   it("keeps large shortfalls exact without floating point", () => {
     const huge = 10_000_000_000_000n; // 1 million XLM
     expect(mandateFunding(0n, huge)).toEqual({ status: "short", shortfall: huge });
+  });
+});
+
+const payflowMock = vi.hoisted(() => ({
+  planSubscriberCount: vi.fn<() => Promise<number>>(),
+}));
+
+vi.mock("@/lib/payflow", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/payflow")>();
+  return { ...original, payflow: { ...original.payflow, ...payflowMock } };
+});
+
+describe("chainPlanSubscriberCount", () => {
+  const SOURCE = "GCH5VHWNS24VI75HLDBHK4SSJ2E5XZA5IB6XEZTNE4BJH7AKZI6Z3MHU";
+
+  it("returns the count when the contract supports the getter", async () => {
+    payflowMock.planSubscriberCount.mockResolvedValue(7);
+    expect(await chainPlanSubscriberCount(SOURCE, 1)).toBe(7);
+  });
+
+  it("returns null when the contract does not support the getter", async () => {
+    // Old contracts throw; the fallback must hide the stat rather than
+    // surface a zero that implies no one has subscribed.
+    payflowMock.planSubscriberCount.mockRejectedValue(new Error("missing entry"));
+    expect(await chainPlanSubscriberCount(SOURCE, 1)).toBeNull();
+  });
+
+  it("returns null on any other contract error", async () => {
+    payflowMock.planSubscriberCount.mockRejectedValue(new Error("RPC timeout"));
+    expect(await chainPlanSubscriberCount(SOURCE, 1)).toBeNull();
+  });
+
+  it("passes planId through to the contract call", async () => {
+    payflowMock.planSubscriberCount.mockResolvedValue(3);
+    await chainPlanSubscriberCount(SOURCE, 42);
+    expect(payflowMock.planSubscriberCount).toHaveBeenCalledWith(SOURCE, 42);
   });
 });

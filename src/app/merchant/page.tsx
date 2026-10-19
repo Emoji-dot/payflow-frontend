@@ -6,7 +6,7 @@ import { api, type ApiMandate, type ApiPlan, type MerchantSummary } from "@/lib/
 import { RevenueChart } from "@/components/RevenueChart";
 import { buildCsv, downloadCsv, exportFilename, type ChargeRow } from "@/lib/csv";
 import { fillBuckets, parseRevenue, type BucketSize, type RevenuePoint } from "@/lib/revenue";
-import { chainMandatesFor, chainMerchantSummary, chainPlansOf, endable, mandateFunding } from "@/lib/chain";
+import { chainMandatesFor, chainMerchantSummary, chainPlanSubscriberCount, chainPlansOf, endable, mandateFunding } from "@/lib/chain";
 import { config } from "@/lib/config";
 import { MAX_NAME_LEN, nameByteLength, payflow, server } from "@/lib/payflow";
 import { useWallet } from "@/lib/wallet";
@@ -67,6 +67,20 @@ export default function MerchantPage() {
   const [plans, setPlans] = useState<ApiPlan[] | null>(null);
   const [mandates, setMandates] = useState<ApiMandate[] | null>(null);
   const [summary, setSummary] = useState<MerchantSummary | null>(null);
+  /**
+   * Per-plan performance stats keyed by plan id.
+   *
+   * A missing key means the fetch has not returned yet (loading).
+   * `null` means neither the API nor the contract could supply the data —
+   * the stats block is hidden entirely.
+   * `{ subscriber_count }` alone (no `total_collected`) means only the
+   * contract's open-mandate counter was available; charge history requires
+   * the indexer, so Collected and Cancellations stay hidden.
+   * A full object means the backend supplied all three figures.
+   */
+  const [planStats, setPlanStats] = useState<
+    Record<number, { subscriber_count: number; total_collected?: string; cancellations?: number } | null>
+  >({});
   // Vault balance per subscriber address, read in parallel with mandates.
   const [balances, setBalances] = useState<Record<string, bigint | null>>({});
   const [exporting, setExporting] = useState(false);
@@ -121,11 +135,15 @@ export default function MerchantPage() {
       api.mandatesFor(address),
       api.merchantSummary(address),
     ]);
+
+    let loadedPlans: ApiPlan[] = [];
     if (p) {
       setPlans(p.plans);
+      loadedPlans = p.plans;
     } else {
       try {
-        setPlans(await chainPlansOf(address, address));
+        loadedPlans = await chainPlansOf(address, address);
+        setPlans(loadedPlans);
       } catch {
         setPlans([]);
       }
@@ -145,6 +163,30 @@ export default function MerchantPage() {
 
     // Revenue totals come from charge history, which only the indexer has.
     setSummary(s ?? chainMerchantSummary(address, rows));
+
+    // Per-plan stats: try the backend first; fall back to the contract for
+    // the subscriber count only (total_collected and cancellations require
+    // charge history which only the indexer holds).
+    if (loadedPlans.length > 0) {
+      void Promise.all(
+        loadedPlans.map(async (plan) => {
+          const apiStats = await api.planStats(plan.id);
+          if (apiStats !== null) {
+            setPlanStats((prev) => ({ ...prev, [plan.id]: apiStats }));
+            return;
+          }
+          // API unavailable: read subscriber count from contract state if
+          // the contract supports it. total_collected and cancellations are
+          // not derivable from chain alone, so they stay absent and the UI
+          // hides them.
+          const count = await chainPlanSubscriberCount(address, plan.id);
+          setPlanStats((prev) => ({
+            ...prev,
+            [plan.id]: count !== null ? { subscriber_count: count } : null,
+          }));
+        }),
+      );
+    }
 
     // Read each subscriber's vault balance in parallel so the dashboard can
     // flag mandates that will fail. Individual reads may fail without breaking
@@ -511,6 +553,15 @@ export default function MerchantPage() {
           <div className="space-y-3">
             {plans.map((p) => {
               const meta = metaFor(metas, p.token);
+              const stats = planStats[p.id];
+              // stats === undefined → still loading (key absent from the map)
+              // stats === null      → stat source could not supply data; hide
+              const statsLoading = !(p.id in planStats);
+              // total_collected and cancellations require charge history, which
+              // only the indexer holds. They are absent when the stats came
+              // from the contract fallback, so the UI hides them rather than
+              // show misleading zeros.
+              const hasRevenue = stats?.total_collected !== undefined;
               return (
                 <div
                   key={p.id}
@@ -530,6 +581,49 @@ export default function MerchantPage() {
                       {fromStroops(p.amount, 4, meta.decimals)} {meta.symbol}{" "}
                       {formatPeriod(p.period)}
                     </div>
+                    {/* Per-plan stats: subscriber count always shown when
+                        readable; total collected and cancellations only when
+                        the indexer supplied them (charge history needs the
+                        backend). Hidden entirely when neither the API nor the
+                        contract can supply a subscriber count. */}
+                    {statsLoading ? (
+                      <div
+                        className="mt-2 flex flex-wrap gap-4 text-xs text-muted"
+                        aria-busy="true"
+                        role="status"
+                      >
+                        <span className="sr-only">Loading plan stats…</span>
+                        <span className="h-4 w-20 rounded bg-white/10 motion-safe:animate-pulse" aria-hidden="true" />
+                        <span className="h-4 w-24 rounded bg-white/10 motion-safe:animate-pulse" aria-hidden="true" />
+                        <span className="h-4 w-20 rounded bg-white/10 motion-safe:animate-pulse" aria-hidden="true" />
+                      </div>
+                    ) : stats ? (
+                      <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+                        <div className="flex gap-1">
+                          <dt>Subscribers</dt>
+                          <dd className="font-medium text-foreground tabular-nums">
+                            {stats.subscriber_count}
+                          </dd>
+                        </div>
+                        {hasRevenue && (
+                          <>
+                            <div className="flex gap-1">
+                              <dt>Collected</dt>
+                              <dd className="font-medium text-foreground tabular-nums">
+                                {fromStroops(stats.total_collected!, 4, meta.decimals)}{" "}
+                                {meta.symbol}
+                              </dd>
+                            </div>
+                            <div className="flex gap-1">
+                              <dt>Cancellations</dt>
+                              <dd className="font-medium text-foreground tabular-nums">
+                                {stats.cancellations!}
+                              </dd>
+                            </div>
+                          </>
+                        )}
+                      </dl>
+                    ) : null}
                   </div>
                   <button
                     type="button"
